@@ -1,12 +1,11 @@
 // MQTT → FuelLink HTTPS Bridge
 import mqtt from "mqtt";
-import crypto from "node:crypto";
 
 const {
   MQTT_URL,
   MQTT_USERNAME,
   MQTT_PASSWORD,
-  MQTT_CLIENT_ID = `fuellink-bridge-${crypto.randomBytes(4).toString("hex")}`,
+  MQTT_CLIENT_ID = `fuellink-bridge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`,
   BACKEND_URL,
   NOZZLE_BRIDGE_TOKEN,
   TELEMETRY_TOPIC = "fueling/+/status",
@@ -79,8 +78,9 @@ const client = mqtt.connect(MQTT_URL, {
   clientId: MQTT_CLIENT_ID,
   username: MQTT_USERNAME || undefined,
   password: MQTT_PASSWORD || undefined,
-  reconnectPeriod: 5000,
-  keepalive: 30,
+  reconnectPeriod: 10000,     // Increased from 5000
+  keepalive: 60,              // Increased from 30
+  connectTimeout: 30000,      // 30 second connection timeout
   clean: true,
   protocolVersion: 4,
 });
@@ -94,7 +94,7 @@ client.on("connect", () => {
   });
 });
 
-client.on("reconnect", () => console.log("[mqtt] reconnecting..."));
+client.on("reconnect", () => console.log(`[mqtt] reconnecting to ${MQTT_URL} (next attempt in 10s)...`));
 client.on("close", () => console.log("[mqtt] connection closed"));
 client.on("error", (e) => console.error("[mqtt] error:", e.message));
 
