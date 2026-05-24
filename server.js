@@ -2,24 +2,36 @@
 import mqtt from "mqtt";
 import crypto from "node:crypto";
 
-const {
-  MQTT_URL,
-  MQTT_USERNAME,
-  MQTT_PASSWORD,
-  MQTT_CLIENT_ID = `fuellink-bridge-${crypto.randomBytes(4).toString("hex")}`,
-  BACKEND_URL,
-  NOZZLE_BRIDGE_TOKEN,
-  TELEMETRY_TOPIC = "fueling/+/status",
-  EVENT_TOPIC = "fueling/+/event",
-  AUTH_TOPIC = "fueling/+/auth",
-  OFFLINE_AFTER_SECONDS = "180",
-  IDLE_PING_SECONDS = "120",
-} = process.env;
+function getEnvVars() {
+  const vars = {
+    MQTT_URL: process.env.MQTT_URL,
+    MQTT_USERNAME: process.env.MQTT_USERNAME,
+    MQTT_PASSWORD: process.env.MQTT_PASSWORD,
+    MQTT_CLIENT_ID: process.env.MQTT_CLIENT_ID || `fuellink-bridge-${crypto.randomBytes(4).toString("hex")}`,
+    BACKEND_URL: process.env.BACKEND_URL,
+    NOZZLE_BRIDGE_TOKEN: process.env.NOZZLE_BRIDGE_TOKEN,
+    TELEMETRY_TOPIC: process.env.TELEMETRY_TOPIC || "fueling/+/status",
+    EVENT_TOPIC: process.env.EVENT_TOPIC || "fueling/+/event",
+    AUTH_TOPIC: process.env.AUTH_TOPIC || "fueling/+/auth",
+    OFFLINE_AFTER_SECONDS: process.env.OFFLINE_AFTER_SECONDS || "180",
+    IDLE_PING_SECONDS: process.env.IDLE_PING_SECONDS || "120",
+  };
 
-if (!MQTT_URL || !BACKEND_URL || !NOZZLE_BRIDGE_TOKEN) {
-  console.error("Missing required env vars: MQTT_URL, BACKEND_URL, NOZZLE_BRIDGE_TOKEN");
-  process.exit(1);
+  const missing = [];
+  if (!vars.MQTT_URL) missing.push("MQTT_URL");
+  if (!vars.BACKEND_URL) missing.push("BACKEND_URL");
+  if (!vars.NOZZLE_BRIDGE_TOKEN) missing.push("NOZZLE_BRIDGE_TOKEN");
+
+  if (missing.length > 0) {
+    console.error(`[ERROR] Missing required env vars: ${missing.join(", ")}`);
+    console.error(`[DEBUG] Available env vars: ${Object.keys(process.env).filter(k => k.startsWith("MQTT_") || k.startsWith("BACKEND_") || k.startsWith("NOZZLE_")).join(", ")}`);
+    process.exit(1);
+  }
+
+  return vars;
 }
+
+const { MQTT_URL, MQTT_USERNAME, MQTT_PASSWORD, MQTT_CLIENT_ID, BACKEND_URL, NOZZLE_BRIDGE_TOKEN, TELEMETRY_TOPIC, EVENT_TOPIC, AUTH_TOPIC, OFFLINE_AFTER_SECONDS, IDLE_PING_SECONDS } = getEnvVars();
 
 const idleMs = Number(IDLE_PING_SECONDS) * 1000;
 const offlineMs = Number(OFFLINE_AFTER_SECONDS) * 1000;
