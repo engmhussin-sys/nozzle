@@ -1,12 +1,10 @@
 // MQTT → FuelLink HTTPS Bridge
 import mqtt from "mqtt";
-import crypto from "node:crypto";
 
 const {
   MQTT_URL,
   MQTT_USERNAME,
   MQTT_PASSWORD,
-  MQTT_CLIENT_ID = `fuellink-bridge-${crypto.randomBytes(4).toString("hex")}`,
   BACKEND_URL,
   NOZZLE_BRIDGE_TOKEN,
   TELEMETRY_TOPIC = "fueling/+/status",
@@ -25,6 +23,7 @@ const idleMs = Number(IDLE_PING_SECONDS) * 1000;
 const offlineMs = Number(OFFLINE_AFTER_SECONDS) * 1000;
 const lastSeenByDevice = new Map();
 const onlineDevices = new Set();
+const clientId = "fuellink_" + Math.random().toString(36).slice(2, 10);
 
 function deviceIdFromTopic(topic) {
   const parts = topic.split("/");
@@ -76,17 +75,18 @@ function markOnline(deviceId) {
 }
 
 const client = mqtt.connect(MQTT_URL, {
-  clientId: MQTT_CLIENT_ID,
+  clientId,
   username: MQTT_USERNAME || undefined,
   password: MQTT_PASSWORD || undefined,
-  reconnectPeriod: 5000,
+  reconnectPeriod: 10000,
   keepalive: 30,
   clean: true,
   protocolVersion: 4,
 });
 
 client.on("connect", () => {
-  console.log(`[mqtt] connected as ${MQTT_CLIENT_ID} to ${MQTT_URL}`);
+  console.log(`[mqtt] connected as ${clientId} to ${MQTT_URL}`);
+  console.log("[MQTT] Stable connection established - clientId:", clientId);
   const subs = [TELEMETRY_TOPIC, EVENT_TOPIC, AUTH_TOPIC];
   client.subscribe(subs, { qos: 0 }, (err, granted) => {
     if (err) console.error("[mqtt] subscribe error:", err.message);
