@@ -1,135 +1,140 @@
-// MQTT → FuelLink HTTPS Bridge
-import mqtt from "mqtt";
-import crypto from "node:crypto";
+const net = require("net");
+const http = require("http");
+const WebSocket = require("ws");
+const mqttPacket = require("mqtt-packet");
 
-const {
-  MQTT_URL,
-  MQTT_USERNAME,
-  MQTT_PASSWORD,
-  MQTT_CLIENT_ID = `fuellink-bridge-${crypto.randomBytes(4).toString("hex")}`,
-  BACKEND_URL,
-  NOZZLE_BRIDGE_TOKEN,
-  TELEMETRY_TOPIC = "fueling/+/status",
-  EVENT_TOPIC = "fueling/+/event",
-  AUTH_TOPIC = "fueling/+/auth",
-  OFFLINE_AFTER_SECONDS = "180",
-  IDLE_PING_SECONDS = "120",
-} = process.env;
+const PORT = process.env.PORT || 3001;
+const MQTT_HOST = "iot.gorex.ai";
+const MQTT_PORT = 1883;
+const MQTT_USER = "fuelingnozzle";
+const MQTT_PASS = "FuelingNozzle@fai";
 
-if (!MQTT_URL || !BACKEND_URL || !NOZZLE_BRIDGE_TOKEN) {
-  console.error("Missing required env vars: MQTT_URL, BACKEND_URL, NOZZLE_BRIDGE_TOKEN");
-  process.exit(1);
+const devices = {};
+const events = [];
+const wsClients = new Set();
+let mqttSocket = null;
+let mqttConnected = false;
+
+function broadcast(data) {
+  const msg = JSON.stringify(data);
+  wsClients.forEach(c => { if (c.readyState === 1) c.send(msg); });
 }
 
-const idleMs = Number(IDLE_PING_SECONDS) * 1000;
-const offlineMs = Number(OFFLINE_AFTER_SECONDS) * 1000;
-const lastSeenByDevice = new Map();
-const onlineDevices = new Set();
-
-function deviceIdFromTopic(topic) {
-  const parts = topic.split("/");
-  if (parts.length >= 3 && parts[0] === "fueling") return parts[1];
-  return null;
+function sendMQTT(pkt) {
+  if (!mqttSocket || !mqttConnected) return false;
+  try { mqttSocket.write(mqttPacket.generate(pkt)); return true; }
+  catch(e) { return false; }
 }
 
-async function post(path, body, label) {
-  try {
-    const res = await fetch(`${BACKEND_URL}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-bridge-token": NOZZLE_BRIDGE_TOKEN },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      console.warn(`[${label}] → ${res.status} ${txt.slice(0, 200)}`);
-    } else {
-      console.log(`[${label}] → 200`);
-    }
-  } catch (e) {
-    console.warn(`[${label}] failed:`, e.message);
-  }
-}
-
-function postPresence(deviceId, event, extra = {}) {
-  if (!deviceId) return;
-  return post("/api/public/nozzle-presence",
-    { device_id: deviceId, event, ts: new Date().toISOString(), ...extra },
-    `presence ${event} ${deviceId}`);
-}
-
-function postTelemetry(deviceId, payload, topic) {
-  if (!deviceId) return;
-  const body = {
-    device_id: deviceId, topic,
-    ...(payload && typeof payload === "object" ? payload : { raw: String(payload) }),
-  };
-  return post("/api/public/nozzle-telemetry", body, `telemetry ${deviceId}`);
-}
-
-function markOnline(deviceId) {
-  if (!deviceId) return;
-  lastSeenByDevice.set(deviceId, Date.now());
-  if (!onlineDevices.has(deviceId)) {
-    onlineDevices.add(deviceId);
-    postPresence(deviceId, "connected");
-  }
-}
-
-const client = mqtt.connect(MQTT_URL, {
-  clientId: MQTT_CLIENT_ID,
-  username: MQTT_USERNAME || undefined,
-  password: MQTT_PASSWORD || undefined,
-  reconnectPeriod: 5000,
-  keepalive: 30,
-  clean: true,
-  protocolVersion: 4,
-});
-
-client.on("connect", () => {
-  console.log(`[mqtt] connected as ${MQTT_CLIENT_ID} to ${MQTT_URL}`);
-  const subs = [TELEMETRY_TOPIC, EVENT_TOPIC, AUTH_TOPIC];
-  client.subscribe(subs, { qos: 0 }, (err, granted) => {
-    if (err) console.error("[mqtt] subscribe error:", err.message);
-    else console.log("[mqtt] subscribed:", granted.map(g => `${g.topic} (qos ${g.qos})`).join(", "));
+function connectMQTT() {
+  console.log("Connecting to MQTT broker...");
+  mqttSocket = net.createConnection(MQTT_PORT, MQTT_HOST);
+  
+  mqttSocket.on("connect", () => {
+    const clientId = "fl_" + Date.now().toString(36);
+    mqttSocket.write(mqttPacket.generate({
+      cmd: "connect", protocolId: "MQTT", protocolVersion: 4,
+      clientId, username: MQTT_USER,
+      password: Buffer.from(MQTT_PASS),
+      keepalive: 60, clean: true
+    }));
   });
-});
-
-client.on("reconnect", () => console.log("[mqtt] reconnecting..."));
-client.on("close", () => console.log("[mqtt] connection closed"));
-client.on("error", (e) => console.error("[mqtt] error:", e.message));
-
-client.on("message", (topic, message) => {
-  try {
-    const deviceId = deviceIdFromTopic(topic);
-    if (!deviceId) return;
-    let payload = null;
-    try { payload = JSON.parse(message.toString("utf-8")); }
-    catch { payload = { raw: message.toString("utf-8") }; }
-    markOnline(deviceId);
-    postTelemetry(deviceId, payload, topic);
-  } catch (e) {
-    console.error("[message] handler error:", e.message);
-  }
-});
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [deviceId, ts] of lastSeenByDevice.entries()) {
-    const silent = now - ts;
-    if (silent >= offlineMs) {
-      if (onlineDevices.has(deviceId)) {
-        onlineDevices.delete(deviceId);
-        postPresence(deviceId, "disconnected", { reason: "idle_timeout" });
+  
+  const parser = mqttPacket.parser({ protocolVersion: 4 });
+  
+  parser.on("packet", pkt => {
+    if (pkt.cmd === "connack") {
+      if (pkt.returnCode === 0) {
+        mqttConnected = true;
+        console.log("MQTT connected successfully");
+        sendMQTT({ cmd: "subscribe", messageId: 1,
+          subscriptions: [{ topic: "fueling/#", qos: 0 }] });
+        broadcast({ type: "broker_connected" });
       }
-      lastSeenByDevice.delete(deviceId);
-    } else if (silent >= idleMs) {
-      postPresence(deviceId, "ping");
-      lastSeenByDevice.set(deviceId, now);
     }
-  }
-}, Math.max(15_000, Math.min(idleMs, offlineMs) / 2));
+    
+    if (pkt.cmd === "publish") {
+      const topic = pkt.topic;
+      const payload = pkt.payload.toString();
+      const parts = topic.split("/");
+      if (parts[0] !== "fueling" || parts.length < 3) return;
+      
+      const deviceId = parts[1];
+      const topicType = parts[2];
+      
+      if (!devices[deviceId]) devices[deviceId] = { deviceId, msgCount: 0, topics: [] };
+      const dev = devices[deviceId];
+      dev.lastSeen = new Date().toISOString();
+      dev.msgCount++;
+      if (!dev.topics.includes(topicType)) dev.topics.push(topicType);
+      
+      try {
+        const data = JSON.parse(payload);
+        if (topicType === "status") Object.assign(dev, { status: data.status, battery: data.battery, firmware: data.firmware });
+        if (topicType === "event") { events.unshift({ ...data, deviceId, receivedAt: new Date().toISOString() }); if (events.length > 500) events.length = 500; }
+        if (topicType === "auth") {
+          sendMQTT({ cmd: "publish", topic: "fueling/" + deviceId + "/auth",
+            payload: Buffer.from(JSON.stringify({ deviceId, vehicleId: data.vehicleId, authStatus: "success", timestamp: new Date().toISOString(), qtyAllowed: "50L" })),
+            qos: 0, retain: false, dup: false });
+        }
+      } catch(e) {}
+      
+      broadcast({ type: "mqtt_message", topic, payload, deviceId, topicType, device: devices[deviceId] });
+    }
+    
+    if (pkt.cmd === "pingresp") {}
+  });
+  
+  parser.on("error", () => {});
+  mqttSocket.on("data", d => parser.parse(d));
+  
+  const ping = setInterval(() => { if (mqttConnected) sendMQTT({ cmd: "pingreq" }); }, 25000);
+  
+  mqttSocket.on("close", () => {
+    mqttConnected = false;
+    clearInterval(ping);
+    console.log("MQTT disconnected - reconnecting in 8s");
+    broadcast({ type: "broker_disconnected" });
+    setTimeout(connectMQTT, 8000);
+  });
+  
+  mqttSocket.on("error", e => { mqttConnected = false; clearInterval(ping); });
+}
 
-process.on("SIGINT", () => {
-  console.log("Shutting down...");
-  client.end(true, () => process.exit(0));
+const httpServer = http.createServer((req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Content-Type", "application/json");
+  const url = req.url.split("?")[0];
+  
+  if (url === "/health") return res.end(JSON.stringify({ ok: true, mqttConnected, deviceCount: Object.keys(devices).length, devices: Object.keys(devices), eventCount: events.length, uptime: Math.floor(process.uptime()) + "s" }));
+  if (url === "/devices") return res.end(JSON.stringify(devices, null, 2));
+  if (url === "/events") return res.end(JSON.stringify(events.slice(0, 50), null, 2));
+  
+  res.end(JSON.stringify({ ok: true, name: "FuelLink Bridge" }));
+});
+
+const wss = new WebSocket.Server({ server: httpServer });
+
+wss.on("connection", ws => {
+  wsClients.add(ws);
+  ws.send(JSON.stringify({ type: "init", mqttConnected, devices, events: events.slice(0, 20) }));
+  
+  ws.on("message", data => {
+    try {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === "publish" && msg.topic) {
+        const pl = typeof msg.payload === "string" ? msg.payload : JSON.stringify(msg.payload);
+        sendMQTT({ cmd: "publish", topic: msg.topic, payload: Buffer.from(pl), qos: 1, retain: false, dup: false, messageId: Math.floor(Math.random() * 65535) });
+      }
+      if (msg.type === "get_devices") ws.send(JSON.stringify({ type: "devices", devices }));
+    } catch(e) {}
+  });
+  
+  ws.on("close", () => wsClients.delete(ws));
+  ws.on("error", () => {});
+});
+
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log("FuelLink Bridge running on port " + PORT);
+  connectMQTT();
 });
