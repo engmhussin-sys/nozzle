@@ -1,7 +1,7 @@
 const net=require("net"),http=require("http"),WebSocket=require("ws"),mqttPacket=require("mqtt-packet");
 const PORT=process.env.PORT||3001,MQTT_HOST=process.env.MQTT_HOST||"iot.gorex.ai",MQTT_PORT=parseInt(process.env.MQTT_PORT||"1883"),MQTT_USER=process.env.MQTT_USER||"fuelingnozzle",MQTT_PASS=process.env.MQTT_PASS||"FuelingNozzle@fai";
 const NOZZLE_TOPICS=["status","event","auth","telemetry"];
-const OFFLINE_TIMEOUT_MS=90*1000;
+const OFFLINE_TIMEOUT_MS=10*60*1000;
 const devices={},events=[],wsClients=new Set();
 let mqttSocket=null,mqttConnected=false;
 function broadcast(data){const msg=JSON.stringify(data);wsClients.forEach(c=>{if(c.readyState===1)c.send(msg);})}
