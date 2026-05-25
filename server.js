@@ -3,7 +3,8 @@ const http = require("http");
 const WebSocket = require("ws");
 const mqttPacket = require("mqtt-packet");
 
-const VERSION = "2.0";
+const VERSION = "3.0";
+const NOZZLE_TOPICS = ["status", "event", "auth", "telemetry"];
 const PORT = process.env.PORT || 3001;
 const MQTT_HOST = "iot.gorex.ai";
 const MQTT_PORT = 1883;
@@ -123,19 +124,28 @@ function connectMQTT() {
       }
 
       const dev = devices[deviceId];
+      const isFromNozzle = NOZZLE_TOPICS.includes(topicType);
+
+      if (!isFromNozzle) {
+        console.log(`[CMD-ECHO] Ignoring command echo on topic ${topic} — not counting as nozzle activity`);
+      }
+
       const wasOffline = dev.status === "offline";
       dev.lastSeen = new Date().toISOString();
       dev.msgCount++;
       if (!dev.topics.includes(topicType)) dev.topics.push(topicType);
 
-      // Reset the offline watchdog
-      resetOfflineTimer(deviceId);
+      // Only reset the offline watchdog for actual nozzle messages
+      if (isFromNozzle) {
+        dev.lastNozzleMessage = new Date().toISOString();
+        resetOfflineTimer(deviceId);
 
-      // Mark back online if it was previously offline
-      if (wasOffline) {
-        dev.status = "online";
-        console.log(`[up] Device ${deviceId} is back online`);
-        broadcast({ type: "device_online", deviceId, device: getCleanDevice(dev) });
+        // Mark back online if it was previously offline
+        if (wasOffline) {
+          dev.status = "online";
+          console.log(`[up] Device ${deviceId} is back online`);
+          broadcast({ type: "device_online", deviceId, device: getCleanDevice(dev) });
+        }
       }
 
       try {
@@ -301,5 +311,6 @@ wss.on("connection", (ws, req) => {
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[up] FuelLink Bridge v${VERSION} running on port ${PORT}`);
   console.log(`[up] Offline timeout: ${OFFLINE_TIMEOUT_MS / 1000}s`);
+  console.log("FIX: Only status/event/auth topics count as nozzle activity");
   connectMQTT();
 });
